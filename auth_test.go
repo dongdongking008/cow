@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"testing"
+	"time"
 )
 
 func TestParseUserPasswd(t *testing.T) {
@@ -11,12 +12,16 @@ func TestParseUserPasswd(t *testing.T) {
 		user string
 		au   *authUser
 	}{
-		{"foo:bar", "foo", &authUser{"bar", "", 0}},
+		{"foo:bar", "foo", &authUser{"foo","bar", "", 0, nil}},
 		{"foo:bar:-1", "", nil},
-		{"hello:world:", "hello", &authUser{"world", "", 0}},
+		{"hello:world:", "hello", &authUser{"hello","world", "", 0, nil}},
 		{"hello:world:0", "", nil},
-		{"hello:world:1024", "hello", &authUser{"world", "", 1024}},
-		{"hello:world:65535", "hello", &authUser{"world", "", 65535}},
+		{"hello:world:1024", "hello", &authUser{"hello","world", "", 1024, nil}},
+		{"hello:world:65535", "hello", &authUser{"hello","world", "", 65535, nil}},
+		{"hello:world:65535:10", "hello", &authUser{"hello","world", "", 65535, nil}},
+		{"hello:world:65535:10:f", "", nil},
+		{"hello:world:65535:f:s", "", nil},
+		{"hello:world:65535:10:h", "hello", &authUser{"hello","world", "", 65535, &rateLimit{10, time.Hour}}},
 	}
 
 	for _, td := range testData {
@@ -35,6 +40,13 @@ func TestParseUserPasswd(t *testing.T) {
 		}
 		if td.au.port != au.port {
 			t.Error(td.val, "port should be:", td.au.port, "got:", au.port)
+		}
+		if td.au.rate != nil && au.rate != nil {
+			if *td.au.rate != *au.rate {
+				t.Error(td.val, "rateLimit should be:", td.au.rate, "got:", au.rate)
+			}
+		} else if td.au.rate != au.rate {
+			t.Error(td.val, "rateLimit should be:", td.au.rate, "got:", au.rate)
 		}
 	}
 }

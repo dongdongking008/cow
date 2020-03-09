@@ -22,6 +22,7 @@ const (
 	statusForbidden      = "403 Forbidden"
 	statusExpectFailed   = "417 Expectation Failed"
 	statusRequestTimeout = "408 Request Timeout"
+	statusTooManyRequests = "429 Too Many Requests"
 )
 
 var CustomHttpErr = errors.New("CustomHttpErr")

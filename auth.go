@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cyfdecyf/bufio"
+	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis_rate/v8"
 	"net"
+	netHTTP "net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -33,17 +36,27 @@ type netAddr struct {
 	mask net.IPMask
 }
 
+type rateLimit struct {
+	rate   int	// 0 means no limit
+	period time.Duration
+}
+
 type authUser struct {
-	// user name is the key to auth.user, no need to store here
+	userName string
 	passwd string
 	ha1    string // used in request digest, initialized ondemand
 	port   uint16 // 0 means any port
+	rate   *rateLimit	// 0 means
 }
 
 var auth struct {
 	required bool
 
 	user map[string]*authUser
+
+	clientRateLimit bool
+
+	rateLimiter *redis_rate.Limiter
 
 	allowedClient []netAddr
 
@@ -61,9 +74,9 @@ func (au *authUser) initHA1(user string) {
 func parseUserPasswd(userPasswd string) (user string, au *authUser, err error) {
 	arr := strings.Split(userPasswd, ":")
 	n := len(arr)
-	if n == 1 || n > 3 {
+	if n == 1 || n > 5 {
 		err = errors.New("user password: " + userPasswd +
-			" syntax wrong, should be username:password[:port]")
+			" syntax wrong, should be username:password[:port][:rate:period]")
 		return
 	}
 	user, passwd := arr[0], arr[1]
@@ -73,14 +86,37 @@ func parseUserPasswd(userPasswd string) (user string, au *authUser, err error) {
 		return "", nil, err
 	}
 	var port int
-	if n == 3 && arr[2] != "" {
+	if n >= 3 && arr[2] != "" {
 		port, err = strconv.Atoi(arr[2])
 		if err != nil || port <= 0 || port > 0xffff {
 			err = errors.New("user password: " + userPasswd + " invalid port")
 			return "", nil, err
 		}
 	}
-	au = &authUser{passwd, "", uint16(port)}
+	var rateL *rateLimit
+	if n == 5 && arr[3] != "" && arr[4] != "" {
+		rateL = &rateLimit{ 0, time.Second}
+		rateL.rate, err = strconv.Atoi(arr[3])
+		if err != nil || rateL.rate <= 0 {
+			err = errors.New("user password: " + userPasswd + " invalid rate")
+			return "", nil, err
+		}
+
+		switch arr[4] {
+		case "s":
+			rateL.period = time.Second
+		case "m":
+			rateL.period = time.Minute
+		case "h":
+			rateL.period = time.Hour
+		default:
+			err = errors.New("user password: " + userPasswd + " invalid period")
+			return "", nil, err
+		}
+
+		auth.clientRateLimit = true
+	}
+	au = &authUser{ user,passwd, "", uint16(port), rateL}
 	return user, au, nil
 }
 
@@ -122,10 +158,10 @@ func addUserPasswd(val string) {
 		return
 	}
 	user, au, err := parseUserPasswd(val)
-	debug.Println("user:", user, "port:", au.port)
 	if err != nil {
 		Fatal(err)
 	}
+	debug.Println("user:", user, "port:", au.port)
 	if _, ok := auth.user[user]; ok {
 		Fatal("duplicate user:", user)
 	}
@@ -175,23 +211,45 @@ func initAuth() {
 	if auth.template, err = template.New("auth").Parse(rawTemplate); err != nil {
 		Fatal("internal error generating auth template:", err)
 	}
+
+	if auth.clientRateLimit {
+		if len(config.RateLimitRedisSentinelMasterName) <=0 {
+			Fatal("client rate limit need to config RateLimitRedisSentinelMasterName")
+		}
+		if len(config.RateLimitRedisSentinelAddrs) <=0 {
+			Fatal("client rate limit need to config RateLimitRedisSentinelAddrs")
+		}
+		rdb := redis.NewFailoverClient(&redis.FailoverOptions{
+			MasterName:    config.RateLimitRedisSentinelMasterName,
+			SentinelAddrs: config.RateLimitRedisSentinelAddrs,
+			Password: config.RateLimitRedisPassword,
+		})
+		//_ = rdb.FlushDB().Err()
+
+		auth.rateLimiter = redis_rate.NewLimiter(rdb)
+	}
 }
 
 // Return err = nil if authentication succeed. nonce would be not empty if
 // authentication is needed, and should be passed back on subsequent call.
 func Authenticate(conn *clientConn, r *Request) (err error) {
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-	if auth.authed.has(clientIP) {
-		debug.Printf("%s has already authed\n", clientIP)
-		return
+	if !auth.clientRateLimit {
+		if auth.authed.has(clientIP) {
+			debug.Printf("%s has already authed\n", clientIP)
+			return
+		}
 	}
 	if authIP(clientIP) { // IP is allowed
 		return
 	}
 	err = authUserPasswd(conn, r)
 	if err == nil {
-		auth.authed.add(clientIP)
+		if !auth.clientRateLimit {
+			auth.authed.add(clientIP)
+		}
 	}
+
 	return
 }
 
@@ -231,14 +289,14 @@ func calcRequestDigest(kv map[string]string, ha1, method string) string {
 	return md5sum(strings.Join(arr, ":"))
 }
 
-func checkProxyAuthorization(conn *clientConn, r *Request) error {
+func checkProxyAuthorization(conn *clientConn, r *Request) (*authUser, error) {
 	if debug {
 		debug.Printf("cli(%s) authorization: %s\n", conn.RemoteAddr(), r.ProxyAuthorization)
 	}
 
 	arr := strings.SplitN(r.ProxyAuthorization, " ", 2)
 	if len(arr) != 2 {
-		return errors.New("auth: malformed ProxyAuthorization header: " + r.ProxyAuthorization)
+		return nil, errors.New("auth: malformed ProxyAuthorization header: " + r.ProxyAuthorization)
 	}
 	authMethod := strings.ToLower(strings.TrimSpace(arr[0]))
 	if authMethod == "digest" {
@@ -246,7 +304,7 @@ func checkProxyAuthorization(conn *clientConn, r *Request) error {
 	} else if authMethod == "basic" {
 		return authBasic(conn, arr[1])
 	}
-	return errors.New("auth: method " + arr[0] + " unsupported, must use digest")
+	return nil, errors.New("auth: method " + arr[0] + " unsupported, must use digest")
 }
 
 func authPort(conn *clientConn, user string, au *authUser) error {
@@ -262,72 +320,102 @@ func authPort(conn *clientConn, user string, au *authUser) error {
 	return nil
 }
 
-func authBasic(conn *clientConn, userPasswd string) error {
+func authBasic(conn *clientConn, userPasswd string) (*authUser, error) {
 	b64, err := base64.StdEncoding.DecodeString(userPasswd)
 	if err != nil {
-		return errors.New("auth:" + err.Error())
+		return nil, errors.New("auth:" + err.Error())
 	}
 	arr := strings.Split(string(b64), ":")
 	if len(arr) != 2 {
-		return errors.New("auth: malformed basic auth user:passwd")
+		return nil, errors.New("auth: malformed basic auth user:passwd")
 	}
 	user := arr[0]
 	passwd := arr[1]
 
 	au, ok := auth.user[user]
 	if !ok || au.passwd != passwd {
-		return errAuthRequired
+		return nil, errAuthRequired
 	}
-	return authPort(conn, user, au)
+
+	err = authPort(conn, user, au)
+	if err != nil {
+		return nil, err
+	}
+
+	return au, nil
 }
 
-func authDigest(conn *clientConn, r *Request, keyVal string) error {
+func authDigest(conn *clientConn, r *Request, keyVal string) (*authUser, error) {
 	authHeader := parseKeyValueList(keyVal)
 	if len(authHeader) == 0 {
-		return errors.New("auth: empty authorization list")
+		return nil, errors.New("auth: empty authorization list")
 	}
 	nonceTime, err := strconv.ParseInt(authHeader["nonce"], 16, 64)
 	if err != nil {
-		return fmt.Errorf("auth: nonce %v", err)
+		return nil, fmt.Errorf("auth: nonce %v", err)
 	}
 	// If nonce time too early, reject. iOS will create a new connection to do
 	// authentication.
 	if time.Now().Sub(time.Unix(nonceTime, 0)) > time.Minute {
-		return errAuthRequired
+		return nil, errAuthRequired
 	}
 
 	user := authHeader["username"]
 	au, ok := auth.user[user]
 	if !ok {
 		errl.Printf("cli(%s) auth: no such user: %s\n", conn.RemoteAddr(), authHeader["username"])
-		return errAuthRequired
+		return nil, errAuthRequired
 	}
 
 	if err = authPort(conn, user, au); err != nil {
-		return err
+		return nil, err
 	}
 	if authHeader["qop"] != "auth" {
-		return errors.New("auth: qop wrong: " + authHeader["qop"])
+		return nil, errors.New("auth: qop wrong: " + authHeader["qop"])
 	}
 	response, ok := authHeader["response"]
 	if !ok {
-		return errors.New("auth: no request-digest response")
+		return nil, errors.New("auth: no request-digest response")
 	}
 
 	au.initHA1(user)
 	digest := calcRequestDigest(authHeader, au.ha1, r.Method)
 	if response != digest {
 		errl.Printf("cli(%s) auth: digest not match, maybe password wrong", conn.RemoteAddr())
-		return errAuthRequired
+		return nil, errAuthRequired
 	}
-	return nil
+	return au, nil
 }
 
 func authUserPasswd(conn *clientConn, r *Request) (err error) {
 	if r.ProxyAuthorization != "" {
+		var au *authUser
 		// client has sent authorization header
-		err = checkProxyAuthorization(conn, r)
+		au, err = checkProxyAuthorization(conn, r)
 		if err == nil {
+			if au.rate.rate > 0 {
+				var res *redis_rate.Result
+				res, err = auth.rateLimiter.Allow("user:"+au.userName, &redis_rate.Limit{
+					Rate:   au.rate.rate,
+					Period: au.rate.period,
+					Burst:  au.rate.rate,
+				})
+				if err != nil {
+					sendErrorPage(conn, "502 rate limit error", "Rate limit error", err.Error())
+					return
+				} else if !res.Allowed {
+					errl.Printf("user: %s rate limited: %v", au.userName, res)
+					header := &netHTTP.Header{}
+					after := int64(res.ResetAfter) / 1e9
+					header.Set("Retry-After", strconv.FormatInt(after, 10))
+					header.Set("X-Ratelimit-Limit", strconv.FormatInt(int64(res.Limit.Rate), 10))
+					header.Set("X-Ratelimit-Remaining", strconv.FormatInt(int64(res.Remaining), 10))
+					header.Set("X-Ratelimit-Reset", strconv.FormatInt(time.Now().Add(res.ResetAfter).Unix(), 10))
+					err = errors.New("rate limited for user: " + au.userName)
+					sendErrorPageWithHeader(conn, statusTooManyRequests, "Rate limit", err.Error(), header)
+					return
+				}
+			}
 			return
 		} else if err != errAuthRequired {
 			sendErrorPage(conn, statusBadReq, "Bad authorization request", err.Error())

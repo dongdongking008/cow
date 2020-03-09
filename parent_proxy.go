@@ -12,6 +12,7 @@ import (
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -61,6 +62,9 @@ func initParentPool() {
 		debug.Println("latency parent pool", len(backPool.parent))
 		go updateParentProxyLatency()
 		parentProxy = newLatencyParentPool(backPool.parent)
+	case loadBalanceRoundRobin:
+		debug.Println("latency parent pool", len(backPool.parent))
+		parentProxy = newRoundRobinParentPool(backPool.parent)
 	}
 }
 
@@ -71,7 +75,7 @@ func printParentProxy(parent []ParentWithFail) {
 		case *shadowsocksParent:
 			debug.Println("\tshadowsocks: ", pc.server)
 		case *httpParent:
-			debug.Println("\thttp parent: ", pc.server)
+			debug.Println("\thttp parent: ", pc.server, " with user: ", pc.user)
 		case *socksParent:
 			debug.Println("\tsocks parent: ", pc.server)
 		case *cowParent:
@@ -309,11 +313,48 @@ func updateParentProxyLatency() {
 	}
 }
 
+// Round Robin load balance strategy:
+// Select proxy in the order they appear in config.
+type roundRobinParentPool struct {
+	backupParentPool
+	currentIndex int
+	latencyMutex sync.Mutex
+}
+
+
+func newRoundRobinParentPool(parent []ParentWithFail) *roundRobinParentPool {
+	lp := &roundRobinParentPool{}
+	for _, p := range parent {
+		lp.add(p.ParentProxy)
+	}
+	return lp
+}
+
+func (pp *roundRobinParentPool) empty() bool {
+	return len(pp.parent) == 0
+}
+
+func (pp *roundRobinParentPool) connect(url *URL) (srvconn net.Conn, err error) {
+	nproxy := len(pp.parent)
+
+	if nproxy == 0 {
+		return nil, errors.New("no parent proxy")
+	}
+
+	latencyMutex.Lock()
+	pp.currentIndex = (pp.currentIndex + 1) % len(pp.parent)
+	start := pp.currentIndex
+	latencyMutex.Unlock()
+
+	return connectInOrder(url, pp.parent, start)
+}
+
 // http parent proxy
 type httpParent struct {
 	server     string
 	userPasswd string // for upgrade config
 	authHeader []byte
+	user	   string
 }
 
 type httpConn struct {
@@ -346,6 +387,10 @@ func (hp *httpParent) initAuth(userPasswd string) {
 		return
 	}
 	hp.userPasswd = userPasswd
+	userPassSplited := strings.Split(userPasswd, ":")
+	if len(userPassSplited) > 0 {
+		hp.user = userPassSplited[0]
+	}
 	b64 := base64.StdEncoding.EncodeToString([]byte(userPasswd))
 	hp.authHeader = []byte(headerProxyAuthorization + ": Basic " + b64 + CRLF)
 }
@@ -357,8 +402,8 @@ func (hp *httpParent) connect(url *URL) (net.Conn, error) {
 			hp.server, url.HostPort, err)
 		return nil, err
 	}
-	debug.Printf("connected to: %s via http parent: %s\n",
-		url.HostPort, hp.server)
+	debug.Printf("connected to: %s via http parent: %s with user: %s\n",
+		url.HostPort, hp.server, hp.user)
 	return httpConn{c, hp}, nil
 }
 

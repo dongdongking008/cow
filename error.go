@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	netHTTP "net/http"
 	"os"
 	"text/template"
 	"time"
@@ -62,7 +63,7 @@ func genErrorPage(h1, msg string) (string, error) {
 	return buf.String(), err
 }
 
-func sendPageGeneric(w io.Writer, codeReason, h1, msg string) {
+func sendPageGeneric(w io.Writer, codeReason, h1, msg string, header *netHTTP.Header) {
 	page, err := genErrorPage(h1, msg)
 	if err != nil {
 		errl.Println("Error generating error page:", err)
@@ -81,12 +82,18 @@ func sendPageGeneric(w io.Writer, codeReason, h1, msg string) {
 		errl.Println("Error generating error page header:", err)
 		return
 	}
-
+	if buf != nil {
+		header.Write(buf)
+	}
 	buf.WriteString("\r\n")
 	buf.WriteString(page)
 	w.Write(buf.Bytes())
 }
 
 func sendErrorPage(w io.Writer, codeReason, h1, msg string) {
-	sendPageGeneric(w, codeReason, "[Error] "+h1, msg)
+	sendPageGeneric(w, codeReason, "[Error] "+h1, msg, nil)
+}
+
+func sendErrorPageWithHeader(w io.Writer, codeReason, h1, msg string, header *netHTTP.Header) {
+	sendPageGeneric(w, codeReason, "[Error] "+h1, msg, header)
 }

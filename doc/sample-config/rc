@@ -38,6 +38,7 @@ listen = http://127.0.0.1:7777
 #   backup:  默认策略，优先使用第一个指定的二级代理，其他仅作备份使用
 #   hash:    根据请求的 host name，优先使用 hash 到的某一个二级代理
 #   latency: 优先选择连接延迟最低的二级代理
+#   roundrobin: 轮询
 #
 # 一个二级代理连接失败后会依次尝试其他二级代理
 # 失败的二级代理会以一定的概率再次尝试使用，因此恢复后会重新启用
@@ -110,10 +111,16 @@ listen = http://127.0.0.1:7777
 #userPasswd = username:password
 
 # 如需指定多个用户名密码，可在下面选项指定的文件中列出，文件中每行内容如下
-#   username:password[:port]
+#   username:password[:port][:rate:period]
 # port 为可选项，若指定，则该用户只能从指定端口连接 COW
+# rate 和 period 为可选项，若指定，将会启用限速模式，该用户在每个period内最多请求rate次，rate必须为正整数，period目前支持s/m/h，对应秒/分/时
 # 注意：如有重复用户，COW 会报错退出
 #userPasswdFile = /path/to/file
+
+# 如需启用限速模式，则必须指定限速所使用的redis相关配置
+# rateLimitRedisSentinelMasterName = xxx
+# rateLimitRedisSentinelAddrs = 192.168.54.26:6422,192.168.54.27:6422,192.168.54.29:6422
+# rateLimitRedisPassword = xxxxx
 
 # 认证失效时间
 # 语法：2h3m4s 表示 2 小时 3 分钟 4 秒

@@ -27,6 +27,7 @@ const (
 	loadBalanceBackup LoadBalanceMode = iota
 	loadBalanceHash
 	loadBalanceLatency
+	loadBalanceRoundRobin
 )
 
 // allow the same tunnel ports as polipo
@@ -54,6 +55,11 @@ type Config struct {
 	UserPasswdFile string // file that contains user:passwd:[port] pairs
 	AllowedClient  string
 	AuthTimeout    time.Duration
+
+	// rate limit
+	RateLimitRedisSentinelMasterName    string
+	RateLimitRedisSentinelAddrs []string
+	RateLimitRedisPassword string
 
 	// advanced options
 	DialTimeout time.Duration
@@ -452,6 +458,8 @@ func (p configParser) ParseLoadBalance(val string) {
 		config.LoadBalance = loadBalanceHash
 	case "latency":
 		config.LoadBalance = loadBalanceLatency
+	case "roundrobin":
+		config.LoadBalance = loadBalanceRoundRobin
 	default:
 		Fatalf("invalid loadBalance mode: %s\n", val)
 	}
@@ -557,6 +565,27 @@ func (p configParser) ParseUserPasswdFile(val string) {
 		Fatal("userPasswdFile:", err)
 	}
 	config.UserPasswdFile = val
+}
+
+func (p configParser) ParseRateLimitRedisSentinelMasterName(val string) {
+	config.RateLimitRedisSentinelMasterName = val
+}
+
+func (p configParser) ParseRateLimitRedisSentinelAddrs(val string) {
+	arr := strings.Split(val, ",")
+	sentinelAddrs := make([]string,0)
+	for _, s := range arr {
+		if s == "" {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		sentinelAddrs = append(sentinelAddrs, s)
+	}
+	config.RateLimitRedisSentinelAddrs = sentinelAddrs
+}
+
+func (p configParser) ParseRateLimitRedisPassword(val string) {
+	config.RateLimitRedisPassword = val
 }
 
 func (p configParser) ParseAllowedClient(val string) {
