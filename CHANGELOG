@@ -1,3 +1,8 @@
+0.9.9 (2020-03-09)
+    * Add support for rating limit by user
+    * Add Dockerfile
+    * New load balance strategy: roundrobin
+
 0.9.8 (2016-06-19)
     * Fix OTA support bug in shadowsocks (report by @defia)
     * Fix WeChat image url problem (by @breath-co2 @haha1903)
