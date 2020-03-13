@@ -28,6 +28,7 @@ const (
 	loadBalanceHash
 	loadBalanceLatency
 	loadBalanceRoundRobin
+	loadBalanceRemainCount
 )
 
 // allow the same tunnel ports as polipo
@@ -210,6 +211,35 @@ func (pp proxyParser) ProxyHttp(val string) {
 		Fatal("http parent proxy contains more than one @:", val)
 	}
 
+	rateL := &RateLimit{0, time.Second, 0}
+	arr = strings.Split(server, "#")
+	if len(arr) == 1 {
+		server = arr[0]
+	} else if len(arr) == 2 {
+		server = arr[0]
+		arrRate := strings.Split(arr[1], ":")
+		if len(arrRate) == 2 {
+			var err error
+			rateL.Rate, err = strconv.Atoi(arrRate[0])
+			if err != nil || rateL.Rate <= 0 {
+				Fatal("http parent proxy: ", val, " invalid rate")
+			}
+			switch arrRate[1] {
+			case "s":
+				rateL.Period = time.Second
+			case "m":
+				rateL.Period = time.Minute
+			case "h":
+				rateL.Period = time.Hour
+			default:
+				Fatal("http parent proxy: ", val, " invalid rate")
+			}
+			rateL.Burst = rateL.Rate
+		}
+	} else {
+		Fatal("http parent proxy contains more than one #:", val)
+	}
+
 	if err := checkServerAddr(server); err != nil {
 		Fatal("parent http server", err)
 	}
@@ -218,6 +248,7 @@ func (pp proxyParser) ProxyHttp(val string) {
 
 	parent := newHttpParent(server)
 	parent.initAuth(userPasswd)
+	parent.initRateLimit(rateL)
 	parentProxy.add(parent)
 }
 
@@ -460,6 +491,8 @@ func (p configParser) ParseLoadBalance(val string) {
 		config.LoadBalance = loadBalanceLatency
 	case "roundrobin":
 		config.LoadBalance = loadBalanceRoundRobin
+	case "remaincount":
+		config.LoadBalance = loadBalanceRemainCount
 	default:
 		Fatalf("invalid loadBalance mode: %s\n", val)
 	}

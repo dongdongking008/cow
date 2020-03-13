@@ -39,6 +39,7 @@ listen = http://127.0.0.1:7777
 #   hash:    根据请求的 host name，优先使用 hash 到的某一个二级代理
 #   latency: 优先选择连接延迟最低的二级代理
 #   roundrobin: 轮询
+#   remaincount: 基于剩余数量
 #
 # 一个二级代理连接失败后会依次尝试其他二级代理
 # 失败的二级代理会以一定的概率再次尝试使用，因此恢复后会重新启用
@@ -60,10 +61,10 @@ listen = http://127.0.0.1:7777
 #   proxy = socks5://127.0.0.1:1080
 #
 # HTTP:
-#   proxy = http://127.0.0.1:8080
-#   proxy = http://user:password@127.0.0.1:8080
+#   proxy = http://127.0.0.1:8080[#rate:period]
+#   proxy = http://user:password@127.0.0.1:8080[#rate:period]
 #
-#   用户认证信息为可选项
+#   用户认证信息和频率控制信息为可选项
 #
 # shadowsocks:
 #   proxy = ss://encrypt_method:password@1.2.3.4:8388

@@ -82,7 +82,7 @@ func sendPageGeneric(w io.Writer, codeReason, h1, msg string, header *netHTTP.He
 		errl.Println("Error generating error page header:", err)
 		return
 	}
-	if buf != nil {
+	if header != nil {
 		header.Write(buf)
 	}
 	buf.WriteString("\r\n")

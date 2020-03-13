@@ -22,6 +22,8 @@ type ParentProxy interface {
 	connect(*URL) (net.Conn, error)
 	getServer() string // for use in updating server latency
 	genConfig() string // for upgrading config
+	getRateLimitKey() string // for identifying parent proxy
+	getRateLimitConfig() *RateLimit
 }
 
 // Interface for different proxy selection strategy.
@@ -63,8 +65,11 @@ func initParentPool() {
 		go updateParentProxyLatency()
 		parentProxy = newLatencyParentPool(backPool.parent)
 	case loadBalanceRoundRobin:
-		debug.Println("latency parent pool", len(backPool.parent))
-		parentProxy = newRoundRobinParentPool(backPool.parent)
+		debug.Println("round robin parent pool", len(backPool.parent))
+		parentProxy = newRoundRobinParentPool(backPool)
+	case loadBalanceRemainCount:
+		debug.Println("remain count parent pool", len(backPool.parent))
+		parentProxy = newRemainCountParentPool(backPool)
 	}
 }
 
@@ -318,20 +323,12 @@ func updateParentProxyLatency() {
 type roundRobinParentPool struct {
 	backupParentPool
 	currentIndex int
-	latencyMutex sync.Mutex
+	roundRobinMutex sync.Mutex
 }
 
 
-func newRoundRobinParentPool(parent []ParentWithFail) *roundRobinParentPool {
-	lp := &roundRobinParentPool{}
-	for _, p := range parent {
-		lp.add(p.ParentProxy)
-	}
-	return lp
-}
-
-func (pp *roundRobinParentPool) empty() bool {
-	return len(pp.parent) == 0
+func newRoundRobinParentPool(parent *backupParentPool) *roundRobinParentPool {
+	return &roundRobinParentPool{*parent, 0, sync.Mutex{}}
 }
 
 func (pp *roundRobinParentPool) connect(url *URL) (srvconn net.Conn, err error) {
@@ -341,12 +338,64 @@ func (pp *roundRobinParentPool) connect(url *URL) (srvconn net.Conn, err error) 
 		return nil, errors.New("no parent proxy")
 	}
 
-	latencyMutex.Lock()
+	pp.roundRobinMutex.Lock()
 	pp.currentIndex = (pp.currentIndex + 1) % len(pp.parent)
 	start := pp.currentIndex
-	latencyMutex.Unlock()
+	pp.roundRobinMutex.Unlock()
 
 	return connectInOrder(url, pp.parent, start)
+}
+
+// Remain Count load balance strategy:
+// Select proxy in the order they appear in config.
+type remainCountParentPool struct {
+	backupParentPool
+	mapParentByKey map[string]*ParentWithFail
+	limiter *RemainCountLimiter
+}
+
+func newRemainCountParentPool(parent *backupParentPool) *remainCountParentPool {
+	rcConfig := map[string]*RateLimit{}
+	mapParentByKey := map[string]*ParentWithFail{}
+	for i := 0; i < len(parent.parent); i++ {
+		v := &parent.parent[i]
+		rl := v.getRateLimitConfig()
+		if rl == nil || rl.Rate <= 0 {
+			Fatal("remain count based load balance must have rate limit config, proxy parent: ", v.getRateLimitKey())
+		}
+		rcConfig[v.getRateLimitKey()] = v.getRateLimitConfig()
+		mapParentByKey[v.getRateLimitKey()] = v
+	}
+	return &remainCountParentPool{ *parent, mapParentByKey,
+	NewRemainCountLimiter("parent_proxy_pool", rcConfig)}
+}
+
+func (pp *remainCountParentPool) empty() bool {
+	return len(pp.parent) == 0
+}
+
+func (pp *remainCountParentPool) connect(url *URL) (srvconn net.Conn, err error) {
+	nproxy := len(pp.parent)
+
+	if nproxy == 0 {
+		return nil, errors.New("no parent proxy")
+	}
+
+	result, err := pp.limiter.Allow()
+	if err != nil {
+		debugLog.Printf("get parent proxy error: %v", err)
+		return nil, err
+	} else if result.Allowed && len(result.RateLimitKey) > 0 {
+		if parent, ok := pp.mapParentByKey[result.RateLimitKey]; ok {
+			if srvconn, err = parent.connect(url); err == nil {
+				return
+			}
+		} else {
+			panic(fmt.Sprint( result.RateLimitKey," not found in proxy config"))
+		}
+	}
+	errorLog.Print("no available parent proxy: ", url)
+	return nil, errors.New("no available parent proxy")
 }
 
 // http parent proxy
@@ -355,6 +404,7 @@ type httpParent struct {
 	userPasswd string // for upgrade config
 	authHeader []byte
 	user	   string
+	rate   *RateLimit	// 0 means unlimited
 }
 
 type httpConn struct {
@@ -363,11 +413,16 @@ type httpConn struct {
 }
 
 func (s httpConn) String() string {
-	return "http parent proxy " + s.parent.server
+	res := fmt.Sprint("http parent proxy ", s.parent.server)
+	if len(s.parent.user) > 0 {
+		return fmt.Sprint(res, " with user ", s.parent.user)
+	} else {
+		return res
+	}
 }
 
 func newHttpParent(server string) *httpParent {
-	return &httpParent{server: server}
+	return &httpParent{server: server, rate: &RateLimit{0, time.Second, 0}}
 }
 
 func (hp *httpParent) getServer() string {
@@ -375,11 +430,35 @@ func (hp *httpParent) getServer() string {
 }
 
 func (hp *httpParent) genConfig() string {
+	var res string
 	if hp.userPasswd != "" {
-		return fmt.Sprintf("proxy = http://%s@%s", hp.userPasswd, hp.server)
+		res = fmt.Sprintf("proxy = http://%s@%s", hp.userPasswd, hp.server)
 	} else {
-		return fmt.Sprintf("proxy = http://%s", hp.server)
+		res = fmt.Sprintf("proxy = http://%s", hp.server)
 	}
+	if hp.rate.Rate > 0 {
+		res = fmt.Sprint(res, "#", hp.rate.Rate)
+		switch hp.rate.Period {
+		case time.Second:
+			return fmt.Sprint(res, "s")
+		case time.Minute:
+			return fmt.Sprint(res, "m")
+		case time.Hour:
+			return fmt.Sprint(res, "h")
+		default:
+			return fmt.Sprint(res, "s")
+		}
+	} else {
+		return res
+	}
+}
+
+func (hp *httpParent) getRateLimitKey() string {
+	return fmt.Sprintf("http://%s@%s", hp.user, hp.server)
+}
+
+func (hp *httpParent) getRateLimitConfig() *RateLimit {
+	return hp.rate
 }
 
 func (hp *httpParent) initAuth(userPasswd string) {
@@ -393,6 +472,13 @@ func (hp *httpParent) initAuth(userPasswd string) {
 	}
 	b64 := base64.StdEncoding.EncodeToString([]byte(userPasswd))
 	hp.authHeader = []byte(headerProxyAuthorization + ": Basic " + b64 + CRLF)
+}
+
+func (hp *httpParent) initRateLimit(limit *RateLimit) {
+	if limit == nil {
+		return
+	}
+	hp.rate = limit
 }
 
 func (hp *httpParent) connect(url *URL) (net.Conn, error) {
@@ -442,6 +528,13 @@ func (sp *shadowsocksParent) genConfig() string {
 		method = "table"
 	}
 	return fmt.Sprintf("proxy = ss://%s:%s@%s", method, sp.passwd, sp.server)
+}
+
+func (sp *shadowsocksParent) getRateLimitKey() string {
+	return fmt.Sprintf("ss://%s@%s", sp.method, sp.server)
+}
+func (sp *shadowsocksParent) getRateLimitConfig() *RateLimit {
+	return nil
 }
 
 func (sp *shadowsocksParent) initCipher(method, passwd string) {
@@ -500,6 +593,14 @@ func (cp *cowParent) genConfig() string {
 		method = "table"
 	}
 	return fmt.Sprintf("proxy = cow://%s:%s@%s", method, cp.passwd, cp.server)
+}
+
+func (cp *cowParent) getRateLimitKey() string {
+	return fmt.Sprintf("cow://%s@%s", cp.method, cp.server)
+}
+
+func (cp *cowParent) getRateLimitConfig() *RateLimit {
+	return nil
 }
 
 func (cp *cowParent) connect(url *URL) (net.Conn, error) {
@@ -561,6 +662,13 @@ func (sp *socksParent) getServer() string {
 
 func (sp *socksParent) genConfig() string {
 	return fmt.Sprintf("proxy = socks5://%s", sp.server)
+}
+
+func (sp *socksParent) getRateLimitKey() string {
+	return fmt.Sprintf("socks5://%s", sp.server)
+}
+func (sp *socksParent) getRateLimitConfig() *RateLimit {
+	return nil
 }
 
 func (sp *socksParent) connect(url *URL) (net.Conn, error) {

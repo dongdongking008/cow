@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestParseListen(t *testing.T) {
@@ -83,6 +84,35 @@ func TestParseProxy(t *testing.T) {
 	}
 	if hp.authHeader == nil {
 		t.Error("2nd http proxy server user password not parsed")
+	}
+
+	parser.ParseProxy("http://127.0.0.1:8080#5:m")
+	cnt++
+	hp, ok = pool.parent[cnt].ParentProxy.(*httpParent)
+	if !ok {
+		t.Fatal("1st http proxy parsed not as httpParent")
+	}
+	if hp.server != "127.0.0.1:8080" {
+		t.Error("1st http proxy server address wrong, got:", hp.server)
+	}
+	if hp.rate.Period != time.Minute {
+		t.Error("2nd http proxy server rate limit not parsed")
+	}
+
+	parser.ParseProxy("http://user:passwd@127.0.0.2:9090#5:m")
+	cnt++
+	hp, ok = pool.parent[cnt].ParentProxy.(*httpParent)
+	if !ok {
+		t.Fatal("2nd http proxy parsed not as httpParent")
+	}
+	if hp.server != "127.0.0.2:9090" {
+		t.Error("2nd http proxy server address wrong, got:", hp.server)
+	}
+	if hp.authHeader == nil {
+		t.Error("2nd http proxy server user password not parsed")
+	}
+	if hp.rate.period != time.Minute {
+		t.Error("2nd http proxy server rate limit not parsed")
 	}
 
 	parser.ParseProxy("socks5://127.0.0.1:1080")

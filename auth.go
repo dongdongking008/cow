@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cyfdecyf/bufio"
-	"github.com/go-redis/redis/v7"
 	"github.com/go-redis/redis_rate/v8"
 	"net"
 	netHTTP "net/http"
@@ -36,17 +35,12 @@ type netAddr struct {
 	mask net.IPMask
 }
 
-type rateLimit struct {
-	rate   int	// 0 means no limit
-	period time.Duration
-}
-
 type authUser struct {
 	userName string
 	passwd string
 	ha1    string // used in request digest, initialized ondemand
 	port   uint16 // 0 means any port
-	rate   *rateLimit	// 0 means
+	rate   *RateLimit	// 0 means unlimited
 }
 
 var auth struct {
@@ -93,26 +87,27 @@ func parseUserPasswd(userPasswd string) (user string, au *authUser, err error) {
 			return "", nil, err
 		}
 	}
-	var rateL *rateLimit
+	var rateL *RateLimit
 	if n == 5 && arr[3] != "" && arr[4] != "" {
-		rateL = &rateLimit{ 0, time.Second}
-		rateL.rate, err = strconv.Atoi(arr[3])
-		if err != nil || rateL.rate <= 0 {
+		rateL = &RateLimit{ 0, time.Second, 0}
+		rateL.Rate, err = strconv.Atoi(arr[3])
+		if err != nil || rateL.Rate <= 0 {
 			err = errors.New("user password: " + userPasswd + " invalid rate")
 			return "", nil, err
 		}
 
 		switch arr[4] {
 		case "s":
-			rateL.period = time.Second
+			rateL.Period = time.Second
 		case "m":
-			rateL.period = time.Minute
+			rateL.Period = time.Minute
 		case "h":
-			rateL.period = time.Hour
+			rateL.Period = time.Hour
 		default:
 			err = errors.New("user password: " + userPasswd + " invalid period")
 			return "", nil, err
 		}
+		rateL.Burst = rateL.Rate
 
 		auth.clientRateLimit = true
 	}
@@ -213,20 +208,7 @@ func initAuth() {
 	}
 
 	if auth.clientRateLimit {
-		if len(config.RateLimitRedisSentinelMasterName) <=0 {
-			Fatal("client rate limit need to config RateLimitRedisSentinelMasterName")
-		}
-		if len(config.RateLimitRedisSentinelAddrs) <=0 {
-			Fatal("client rate limit need to config RateLimitRedisSentinelAddrs")
-		}
-		rdb := redis.NewFailoverClient(&redis.FailoverOptions{
-			MasterName:    config.RateLimitRedisSentinelMasterName,
-			SentinelAddrs: config.RateLimitRedisSentinelAddrs,
-			Password: config.RateLimitRedisPassword,
-		})
-		//_ = rdb.FlushDB().Err()
-
-		auth.rateLimiter = redis_rate.NewLimiter(rdb)
+		auth.rateLimiter = NewLimiter()
 	}
 }
 
@@ -393,12 +375,12 @@ func authUserPasswd(conn *clientConn, r *Request) (err error) {
 		// client has sent authorization header
 		au, err = checkProxyAuthorization(conn, r)
 		if err == nil {
-			if au.rate.rate > 0 {
+			if au.rate.Rate > 0 {
 				var res *redis_rate.Result
 				res, err = auth.rateLimiter.Allow("user:"+au.userName, &redis_rate.Limit{
-					Rate:   au.rate.rate,
-					Period: au.rate.period,
-					Burst:  au.rate.rate,
+					Rate:   au.rate.Rate,
+					Period: au.rate.Period,
+					Burst:  au.rate.Burst,
 				})
 				if err != nil {
 					sendErrorPage(conn, "502 rate limit error", "Rate limit error", err.Error())
@@ -408,7 +390,7 @@ func authUserPasswd(conn *clientConn, r *Request) (err error) {
 					header := &netHTTP.Header{}
 					after := int64(res.ResetAfter) / 1e9
 					header.Set("Retry-After", strconv.FormatInt(after, 10))
-					header.Set("X-Ratelimit-Limit", strconv.FormatInt(int64(res.Limit.Rate), 10))
+					header.Set("X-Ratelimit-RateLimit", strconv.FormatInt(int64(res.Limit.Rate), 10))
 					header.Set("X-Ratelimit-Remaining", strconv.FormatInt(int64(res.Remaining), 10))
 					header.Set("X-Ratelimit-Reset", strconv.FormatInt(time.Now().Add(res.ResetAfter).Unix(), 10))
 					err = errors.New("rate limited for user: " + au.userName)
