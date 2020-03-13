@@ -1,3 +1,6 @@
+0.9.11 (2020-03-13)
+    * Rate limit redis config support single instance
+
 0.9.10 (2020-03-13)
     * New load balance strategy: remain count
 
