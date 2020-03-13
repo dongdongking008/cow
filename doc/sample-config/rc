@@ -118,7 +118,8 @@ listen = http://127.0.0.1:7777
 # 注意：如有重复用户，COW 会报错退出
 #userPasswdFile = /path/to/file
 
-# 如需启用限速模式，则必须指定限速所使用的redis相关配置
+# 如需启用限速模式，则必须指定限速所使用的redis相关配置，如果设置了rateLimitRedisSentinelAddrs则会优先使用sentinael客户端
+# rateLimitRedisAddr = 101.201.235.73:8379
 # rateLimitRedisSentinelMasterName = xxx
 # rateLimitRedisSentinelAddrs = 192.168.54.26:6422,192.168.54.27:6422,192.168.54.29:6422
 # rateLimitRedisPassword = xxxxx

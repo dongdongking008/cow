@@ -58,6 +58,7 @@ type Config struct {
 	AuthTimeout    time.Duration
 
 	// rate limit
+	RateLimitRedisAddr string
 	RateLimitRedisSentinelMasterName    string
 	RateLimitRedisSentinelAddrs []string
 	RateLimitRedisPassword string
@@ -602,6 +603,10 @@ func (p configParser) ParseUserPasswdFile(val string) {
 
 func (p configParser) ParseRateLimitRedisSentinelMasterName(val string) {
 	config.RateLimitRedisSentinelMasterName = val
+}
+
+func (p configParser) ParseRateLimitRedisAddr(val string) {
+	config.RateLimitRedisAddr = val
 }
 
 func (p configParser) ParseRateLimitRedisSentinelAddrs(val string) {

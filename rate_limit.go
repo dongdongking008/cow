@@ -13,17 +13,21 @@ var rdb *redis.Client
 
 func getRDB() *redis.Client {
 	if rdb == nil {
-		if len(config.RateLimitRedisSentinelMasterName) <=0 {
-			Fatal("client rate limit need to config RateLimitRedisSentinelMasterName")
+		if len(config.RateLimitRedisSentinelAddrs) > 0 {
+			rdb = redis.NewFailoverClient(&redis.FailoverOptions{
+				MasterName:    config.RateLimitRedisSentinelMasterName,
+				SentinelAddrs: config.RateLimitRedisSentinelAddrs,
+				Password:      config.RateLimitRedisPassword,
+			})
+		} else {
+			if len(config.RateLimitRedisAddr) <=0 {
+				Fatal("client rate limit need to config RateLimitRedisAddr")
+			}
+			rdb = redis.NewClient(&redis.Options{
+				Addr: config.RateLimitRedisAddr,
+				Password:      config.RateLimitRedisPassword,
+			})
 		}
-		if len(config.RateLimitRedisSentinelAddrs) <=0 {
-			Fatal("client rate limit need to config RateLimitRedisSentinelAddrs")
-		}
-		rdb = redis.NewFailoverClient(&redis.FailoverOptions{
-			MasterName:    config.RateLimitRedisSentinelMasterName,
-			SentinelAddrs: config.RateLimitRedisSentinelAddrs,
-			Password: config.RateLimitRedisPassword,
-		})
 	}
 	return rdb
 	//_ = rdb.FlushDB().Err()
