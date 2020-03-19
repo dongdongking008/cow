@@ -351,7 +351,7 @@ func (pp *roundRobinParentPool) connect(url *URL) (srvconn net.Conn, err error) 
 type remainCountParentPool struct {
 	backupParentPool
 	mapParentByKey map[string]*ParentWithFail
-	limiter *RemainCountLimiter
+	limiter RemainCountLimiter
 }
 
 func newRemainCountParentPool(parent *backupParentPool) *remainCountParentPool {
@@ -366,8 +366,17 @@ func newRemainCountParentPool(parent *backupParentPool) *remainCountParentPool {
 		rcConfig[v.getRateLimitKey()] = v.getRateLimitConfig()
 		mapParentByKey[v.getRateLimitKey()] = v
 	}
+	var limiter RemainCountLimiter
+	switch config.ParentRateLimit {
+	case parentRateLimitTokenBucket:
+		limiter = NewRemainCountTokenBucketLimiter("parent_proxy_pool", rcConfig)
+	case parentRateLimitLeakBucket:
+		limiter = NewRemainCountLimiter("parent_proxy_pool", rcConfig)
+	default:
+		limiter = NewRemainCountLimiter("parent_proxy_pool", rcConfig)
+	}
 	return &remainCountParentPool{ *parent, mapParentByKey,
-	NewRemainCountLimiter("parent_proxy_pool", rcConfig)}
+	limiter}
 }
 
 func (pp *remainCountParentPool) empty() bool {
@@ -393,8 +402,9 @@ func (pp *remainCountParentPool) connect(url *URL) (srvconn net.Conn, err error)
 		} else {
 			panic(fmt.Sprint( result.RateLimitKey," not found in proxy config"))
 		}
+	} else {
+		errorLog.Printf("no available parent proxy: %s, rate limit: %v", url, result)
 	}
-	errorLog.Print("no available parent proxy: ", url)
 	return nil, errors.New("no available parent proxy")
 }
 

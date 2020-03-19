@@ -448,6 +448,9 @@ func (c *clientConn) serve() {
 	}
 
 	defer func() {
+		if err := recover(); err != nil {
+			errorLog.Printf("cli(%s) panic : %v\n", err, c.RemoteAddr())
+		}
 		r.releaseBuf()
 		c.Close()
 	}()

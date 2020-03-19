@@ -54,10 +54,16 @@ func (rateLimit *RateLimit) String() string {
 	return fmt.Sprint(rateLimit.Rate, ":", rateLimit.Period.Seconds(), ":", rateLimit.Burst)
 }
 
+//--------------
+
+type RemainCountLimiter interface {
+	Allow() (*Result, error)
+}
+
 //------------------------------------------------------------------------------
 
 // Limiter controls how frequently events are allowed to happen.
-type RemainCountLimiter struct {
+type RemainCountLeakBucketLimiter struct {
 	rdb rediser
 	limiterKey string
 	rcLastStatSortedSetKey string
@@ -65,18 +71,18 @@ type RemainCountLimiter struct {
 	rcConfig map[string]*RateLimit
 }
 
-const redisPrefix = "rc_rate:"
+const rcRedisPrefix = "rc_rate:"
 
 // NewRemainCountLimiter returns a new Remain Count based Limiter.
-func NewRemainCountLimiter(limiterKey string, rcConfig map[string]*RateLimit) *RemainCountLimiter {
+func NewRemainCountLimiter(limiterKey string, rcConfig map[string]*RateLimit) RemainCountLimiter {
 
 	rdb := getRDB()
 
-	limiter := &RemainCountLimiter{
+	limiter := &RemainCountLeakBucketLimiter{
 		rdb: rdb,
 		limiterKey: limiterKey,
-		rcLastStatSortedSetKey: redisPrefix + limiterKey,
-		rcConfigHashKey: redisPrefix + limiterKey + ":config",
+		rcLastStatSortedSetKey: rcRedisPrefix + limiterKey,
+		rcConfigHashKey: rcRedisPrefix + limiterKey + ":config",
 		rcConfig: rcConfig,
 	}
 
@@ -107,14 +113,14 @@ func NewRemainCountLimiter(limiterKey string, rcConfig map[string]*RateLimit) *R
 }
 
 // Allow reports whether 1 events may happen at time now.
-func (l *RemainCountLimiter) Allow() (*Result, error) {
+func (l *RemainCountLeakBucketLimiter) Allow() (*Result, error) {
 	//if debug {
 	//	rdb := getRDB()
 	//	zResult := rdb.ZRangeWithScores(l.rcLastStatSortedSetKey, 0, 10)
 	//	debugLog.Printf("%s = %v", l.rcLastStatSortedSetKey, zResult.Val())
 	//}
 
-	v, err := remainCountLua.Run(l.rdb, []string{l.rcLastStatSortedSetKey,
+	v, err := luaLeakBucket.Run(l.rdb, []string{l.rcLastStatSortedSetKey,
 	l.rcConfigHashKey}).Result()
 
 	//debugLog.Printf("remain count limiter allow result: %v", v)
@@ -144,6 +150,115 @@ func (l *RemainCountLimiter) Allow() (*Result, error) {
 	}
 	return res, nil
 }
+
+//------------------------------------------------------------------------------
+
+// Limiter controls how frequently events are allowed to happen.
+type RemainCountTokenBucketLimiter struct {
+	rdb rediser
+	limiterKey string
+	rctbLastStatSortedSetKey string
+	rctbRemainCountSortedSetKey string
+	rctbConfigHashKey string
+	rctbConfig map[string]*RateLimit
+}
+
+const rctbRedisPrefix = "rctb_rate:"
+
+// NewRemainTokenBucketCountLimiter returns a new Remain Count Token Bucket based Limiter.
+func NewRemainCountTokenBucketLimiter(limiterKey string, rctbConfig map[string]*RateLimit) *RemainCountTokenBucketLimiter {
+
+	rdb := getRDB()
+
+	limiter := &RemainCountTokenBucketLimiter{
+		rdb: rdb,
+		limiterKey: limiterKey,
+		rctbLastStatSortedSetKey: rctbRedisPrefix + limiterKey,
+		rctbRemainCountSortedSetKey: rctbRedisPrefix + limiterKey + ":remaincount",
+		rctbConfigHashKey: rctbRedisPrefix + limiterKey + ":config",
+		rctbConfig: rctbConfig,
+	}
+
+	mapConfig := make(map[string]interface{})
+	values := make([]*redis.Z, 0)
+	valuesRC := make([]*redis.Z, 0)
+
+	for key, val := range rctbConfig {
+		mapConfig[key] = val.String()
+		values = append(values, &redis.Z{Score: 0, Member: key})
+		valuesRC = append(valuesRC, &redis.Z{Score: float64(val.Rate), Member: key})
+	}
+
+	// Set config hash
+	resConfig := rdb.HMSet(limiter.rctbConfigHashKey, mapConfig)
+	info.Println("init remain count rate limiter config result", resConfig)
+	if resConfig.Err() != nil {
+		panic(errors.New(fmt.Sprint("init remain count rate limiter config error:", resConfig.Err().Error())))
+	}
+
+	// Set last stat sorted set.
+	// Don't update already existing elements. Always add new elements.
+	result := rdb.ZAddNX(limiter.rctbLastStatSortedSetKey, values...)
+	info.Println("init remain count rate limiter result", result)
+	if result.Err() != nil {
+		panic(errors.New(fmt.Sprint("init remain count rate limiter error:", result.Err().Error())))
+	}
+
+	// Set last stat sorted set.
+	// Don't update already existing elements. Always add new elements.
+	resultRC := rdb.ZAddNX(limiter.rctbRemainCountSortedSetKey, valuesRC...)
+	info.Println("init remain count rate limiter rc result", resultRC)
+	if resultRC.Err() != nil {
+		panic(errors.New(fmt.Sprint("init remain count rate limiter rc error:", resultRC.Err().Error())))
+	}
+
+	return limiter
+}
+
+
+// Allow reports whether 1 events may happen at time now.
+func (l *RemainCountTokenBucketLimiter) Allow() (*Result, error) {
+	if debug {
+		rdb := getRDB()
+		zResult := rdb.ZRevRangeByScoreWithScores(l.rctbRemainCountSortedSetKey,
+			&redis.ZRangeBy{ Max: "+inf", Min:"1", Offset: 0, Count: 3})
+		debugLog.Printf("%s = %v", l.rctbRemainCountSortedSetKey, zResult.Val())
+		zResult = rdb.ZRangeWithScores(l.rctbLastStatSortedSetKey, 0, 10)
+		debugLog.Printf("%s = %v", l.rctbLastStatSortedSetKey, zResult.Val())
+	}
+
+	v, err := luaTokenBucket.Run(l.rdb, []string{l.rctbLastStatSortedSetKey,
+		l.rctbRemainCountSortedSetKey,
+		l.rctbConfigHashKey}).Result()
+
+	//debugLog.Printf("remain count limiter allow result: %v", v)
+
+	if err != nil {
+		return nil, err
+	}
+
+	values := v.([]interface{})
+
+	retryAfter, err := strconv.ParseFloat(values[2].(string), 64)
+	if err != nil {
+		return nil, err
+	}
+
+	resetAfter, err := strconv.ParseFloat(values[3].(string), 64)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &Result{
+		Allowed:    values[0].(int64) == 0,
+		Remaining:  int(values[1].(int64)),
+		RetryAfter: dur(retryAfter),
+		ResetAfter: dur(resetAfter),
+		RateLimitKey: values[4].(string),
+	}
+	return res, nil
+}
+
 
 func dur(f float64) time.Duration {
 	if f == -1 {
@@ -179,7 +294,7 @@ type Result struct {
 }
 
 
-var remainCountLua = redis.NewScript(`
+var luaLeakBucket = redis.NewScript(`
 -- this script has side-effects, so it requires replicate commands mode
 redis.replicate_commands()
 
@@ -201,7 +316,7 @@ if #rate_limit_key_replies > 0 then
 		if #config > 0 then
 	    	break
 		else
-			redis.call("ZREM", rate_limit_config_hash_key, rate_limit_key_in_set)
+			redis.call("ZREM", rate_limit_sorted_set_key, rate_limit_key_in_set)
 		end
 	end
 	if #config > 0 then
@@ -256,6 +371,86 @@ if #rate_limit_key_replies > 0 then
 			  redis.call("SET", rate_limit_key, new_tat, "EX", math.ceil(reset_after))
 			  redis.call("ZADD", rate_limit_sorted_set_key, new_tat, rate_limit_key_in_set)
 			  retry_after = -1
+			end
+		end
+	end
+end
+
+return {limited, remaining, tostring(retry_after), tostring(reset_after), rate_limit_key_in_set}
+`)
+
+
+// the Lua script that implements the Token Bucket Algorithm.
+// bucket.tc represents the token count.
+// bucket.ts represents the timestamp of the next time the bucket could be refilled.
+var luaTokenBucket = redis.NewScript(`
+-- this script has side-effects, so it requires replicate commands mode
+redis.replicate_commands()
+
+local limited = 1
+local remaining = 0
+local retry_after = 60
+local reset_after = 60
+local rate_limit_key_in_set
+
+local rate_limit_sorted_set_key = KEYS[1]
+local rate_limit_remain_count_sorted_set_key = KEYS[2]
+local rate_limit_config_hash_key = KEYS[3]
+
+local rate_limit_key_replies = redis.call("ZREVRANGEBYSCORE", rate_limit_remain_count_sorted_set_key, "+inf", 1, "LIMIT", 0, 3)
+
+local config
+
+if #rate_limit_key_replies <= 0 then
+	rate_limit_key_replies = redis.call("ZRANGE", rate_limit_sorted_set_key, 0, 2)
+end
+
+if #rate_limit_key_replies > 0 then
+	local config
+	for limit_key in ipairs(rate_limit_key_replies) do
+		rate_limit_key_in_set = rate_limit_key_replies[1]
+		config = redis.call("HGET", rate_limit_config_hash_key, rate_limit_key_in_set)
+		if #config > 0 then
+	    	break
+		else
+			redis.call("ZREM", rate_limit_sorted_set_key, rate_limit_key_in_set)
+			redis.call("ZREM", rate_limit_remain_count_sorted_set_key, rate_limit_key_in_set)
+		end
+	end
+	if #config > 0 then
+		local t = {}
+		for str in string.gmatch(config, "([^\:]+)") do
+			table.insert(t, str)
+    	end
+		if #t == 3 then
+			local rate_limit_key = rate_limit_sorted_set_key .. ":" ..rate_limit_key_in_set 
+			local capacity = tonumber(t[1])
+			local interval = tonumber(t[2])
+			local now = redis.call("TIME")
+			now = now[1] + (now[2] / 1000000)
+			local bucket = {tc=capacity, ts=now+interval}
+			local value = redis.call("get", rate_limit_key)
+			if value then
+			  bucket = cjson.decode(value)
+			end
+			if now - bucket.ts > 0 then
+			  bucket.tc = capacity
+			  bucket.ts = now + interval
+              redis.call("ZADD", rate_limit_sorted_set_key, bucket.ts, rate_limit_key_in_set)
+			end
+			if bucket.tc > 0 then
+			  bucket.tc = bucket.tc - 1
+			  bucket.ts = string.format("%.f", bucket.ts)
+			  if redis.call("set", rate_limit_key, cjson.encode(bucket)) then
+				redis.call("ZADD", rate_limit_remain_count_sorted_set_key, bucket.tc, rate_limit_key_in_set)
+				limited = 0
+				remaining = bucket.tc
+				reset_after = bucket.ts
+   				retry_after = -1
+			  end
+			else
+			  reset_after = bucket.ts
+			  retry_after = reset_after - now
 			end
 		end
 	end

@@ -31,6 +31,12 @@ const (
 	loadBalanceRemainCount
 )
 
+type ParentRateLimitAlgorithm byte
+const (
+	parentRateLimitLeakBucket ParentRateLimitAlgorithm = iota
+	parentRateLimitTokenBucket
+)
+
 // allow the same tunnel ports as polipo
 var defaultTunnelAllowedPort = []string{
 	"22", "80", "443", // ssh, http, https
@@ -58,6 +64,7 @@ type Config struct {
 	AuthTimeout    time.Duration
 
 	// rate limit
+	ParentRateLimit ParentRateLimitAlgorithm // select parent rate limit mode
 	RateLimitRedisAddr string
 	RateLimitRedisSentinelMasterName    string
 	RateLimitRedisSentinelAddrs []string
@@ -496,6 +503,17 @@ func (p configParser) ParseLoadBalance(val string) {
 		config.LoadBalance = loadBalanceRemainCount
 	default:
 		Fatalf("invalid loadBalance mode: %s\n", val)
+	}
+}
+
+func (p configParser) ParseParentRateLimit(val string) {
+	switch val {
+	case "leakbucket":
+		config.ParentRateLimit = parentRateLimitLeakBucket
+	case "tokenbucket":
+		config.ParentRateLimit = parentRateLimitTokenBucket
+	default:
+		Fatalf("invalid parentRateLimit algorithm: %s\n", val)
 	}
 }
 
