@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"net"
 	"strings"
@@ -100,10 +101,35 @@ type clientConn struct {
 }
 
 var (
+	errUnknown		 = errors.New("error unknown")
 	errPageSent      = errors.New("error page has sent")
 	errClientTimeout = errors.New("read client request timeout")
 	errAuthRequired  = errors.New("authentication requried")
 )
+
+var (
+	proxyRequestsDurationSeconds = prometheus.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Name: "cow_proxy_requests_duration_seconds",
+			Help: "A summary of the request duration of proxy requests.",
+			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+		},
+		[]string{"user"},
+	)
+
+	proxyRequestErrorsCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cow_proxy_request_errors_total",
+			Help: "Number of proxy request errors.",
+		},
+		[]string{"user"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(proxyRequestsDurationSeconds)
+	prometheus.MustRegister(proxyRequestErrorsCount)
+}
 
 type Proxy interface {
 	Serve(*sync.WaitGroup, <-chan struct{})
@@ -440,6 +466,7 @@ func (c *clientConn) serve() {
 	var rp Response
 	var sv *serverConn
 	var err error
+	var au *authUser
 
 	var authed bool
 	// For cow proxy server, authentication is done by matching password.
@@ -447,12 +474,26 @@ func (c *clientConn) serve() {
 		authed = true
 	}
 
+	requestError := errUnknown
+
+	timerRequest := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64){
+		userName := "unknown"
+		if au != nil {
+			userName = au.userName
+		}
+		proxyRequestsDurationSeconds.WithLabelValues(userName).Observe(v)
+		if requestError != nil {
+			proxyRequestErrorsCount.WithLabelValues(userName).Inc()
+		}
+	}))
+
 	defer func() {
 		if err := recover(); err != nil {
 			errorLog.Printf("cli(%s) panic : %v\n", err, c.RemoteAddr())
 		}
 		r.releaseBuf()
 		c.Close()
+		timerRequest.ObserveDuration()
 	}()
 
 	// Refer to implementation.md for the design choices on parsing the request
@@ -488,7 +529,7 @@ func (c *clientConn) serve() {
 		}
 
 		if auth.required && !authed {
-			if err = Authenticate(c, &r); err != nil {
+			if au, err = Authenticate(c, &r); err != nil {
 				errl.Printf("cli(%s) %v\n", c.RemoteAddr(), err)
 				// Request may have body. To make things simple, close
 				// connection so we don't need to skip request body before
@@ -544,6 +585,8 @@ func (c *clientConn) serve() {
 				goto retry
 			}
 			// debug.Printf("doConnect %s to %s done\n", c.RemoteAddr(), r.URL.HostPort)
+			// now we might think this request no error for proxy
+			requestError = nil
 			return
 		}
 
@@ -560,6 +603,10 @@ func (c *clientConn) serve() {
 			}
 			return
 		}
+
+		// now we might think this request no error for proxy
+		requestError = nil
+
 		// Put server connection to pool, so other clients can use it.
 		_, isCowConn := sv.Conn.(cowConn)
 		if rp.ConnectionKeepAlive || isCowConn {

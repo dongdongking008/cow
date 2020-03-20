@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
 	"hash/crc32"
 	"io"
@@ -16,6 +17,20 @@ import (
 	"sync"
 	"time"
 )
+
+var (
+	parentRequestsCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cow_proxy_parent_requests_total",
+			Help: "Number of parent proxy requests.",
+		},
+		[]string{"channel"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(parentRequestsCount)
+}
 
 // Interface that all types of parent proxies should support.
 type ParentProxy interface {
@@ -397,6 +412,7 @@ func (pp *remainCountParentPool) connect(url *URL) (srvconn net.Conn, err error)
 	} else if result.Allowed && len(result.RateLimitKey) > 0 {
 		if parent, ok := pp.mapParentByKey[result.RateLimitKey]; ok {
 			if srvconn, err = parent.connect(url); err == nil {
+				parentRequestsCount.WithLabelValues(result.RateLimitKey).Inc()
 				return
 			}
 		} else {
@@ -405,6 +421,7 @@ func (pp *remainCountParentPool) connect(url *URL) (srvconn net.Conn, err error)
 	} else {
 		errorLog.Printf("no available parent proxy: %s, rate limit: %v", url, result)
 	}
+	proxyRequestsRateLimitedCount.WithLabelValues("parent", "nil").Inc()
 	return nil, errors.New("no available parent proxy")
 }
 

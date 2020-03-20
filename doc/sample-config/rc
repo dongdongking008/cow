@@ -26,6 +26,9 @@
 #
 listen = http://127.0.0.1:7777
 
+# 监控服务(prometheus)监听地址
+#monitorAddr = 127.0.0.1:7778
+
 # 日志文件路径，如不指定则输出到 stdout
 #logFile =
 

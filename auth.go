@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/cyfdecyf/bufio"
 	"github.com/go-redis/redis_rate/v8"
+	"github.com/prometheus/client_golang/prometheus"
 	"net"
 	netHTTP "net/http"
 	"os"
@@ -29,6 +30,20 @@ const (
 </html>
 `
 )
+
+var (
+	proxyRequestsRateLimitedCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cow_proxy_requests_rate_limited_total",
+			Help: "Number of proxy request rate limited.",
+		},
+		[]string{"limit_type", "user"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(proxyRequestsRateLimitedCount)
+}
 
 type netAddr struct {
 	ip   net.IP
@@ -214,7 +229,7 @@ func initAuth() {
 
 // Return err = nil if authentication succeed. nonce would be not empty if
 // authentication is needed, and should be passed back on subsequent call.
-func Authenticate(conn *clientConn, r *Request) (err error) {
+func Authenticate(conn *clientConn, r *Request) (au *authUser, err error) {
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	if !auth.clientRateLimit {
 		if auth.authed.has(clientIP) {
@@ -225,7 +240,7 @@ func Authenticate(conn *clientConn, r *Request) (err error) {
 	if authIP(clientIP) { // IP is allowed
 		return
 	}
-	err = authUserPasswd(conn, r)
+	au, err = authUserPasswd(conn, r)
 	if err == nil {
 		if !auth.clientRateLimit {
 			auth.authed.add(clientIP)
@@ -369,9 +384,8 @@ func authDigest(conn *clientConn, r *Request, keyVal string) (*authUser, error) 
 	return au, nil
 }
 
-func authUserPasswd(conn *clientConn, r *Request) (err error) {
+func authUserPasswd(conn *clientConn, r *Request) (au *authUser, err error) {
 	if r.ProxyAuthorization != "" {
-		var au *authUser
 		// client has sent authorization header
 		au, err = checkProxyAuthorization(conn, r)
 		if err == nil {
@@ -395,6 +409,7 @@ func authUserPasswd(conn *clientConn, r *Request) (err error) {
 					header.Set("X-Ratelimit-Reset", strconv.FormatInt(time.Now().Add(res.ResetAfter).Unix(), 10))
 					err = errors.New("rate limited for user: " + au.userName)
 					sendErrorPageWithHeader(conn, statusTooManyRequests, "Rate limit", err.Error(), header)
+					proxyRequestsRateLimitedCount.WithLabelValues("user", au.userName).Inc()
 					return
 				}
 			}
@@ -414,13 +429,13 @@ func authUserPasswd(conn *clientConn, r *Request) (err error) {
 	}
 	buf := new(bytes.Buffer)
 	if err := auth.template.Execute(buf, data); err != nil {
-		return fmt.Errorf("error generating auth response: %v", err)
+		return au, fmt.Errorf("error generating auth response: %v", err)
 	}
 	if bool(debug) && verbose {
 		debug.Printf("authorization response:\n%s", buf.String())
 	}
 	if _, err := conn.Write(buf.Bytes()); err != nil {
-		return fmt.Errorf("send auth response error: %v", err)
+		return au, fmt.Errorf("send auth response error: %v", err)
 	}
-	return errAuthRequired
+	return au, errAuthRequired
 }

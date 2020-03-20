@@ -71,6 +71,8 @@ func main() {
 		info.Println("timeout estimation disabled")
 	}
 
+	go prometheusHandler()
+
 	var wg sync.WaitGroup
 	wg.Add(len(listenProxy))
 	for _, proxy := range listenProxy {

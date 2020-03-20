@@ -70,6 +70,9 @@ type Config struct {
 	RateLimitRedisSentinelAddrs []string
 	RateLimitRedisPassword string
 
+	// monitor
+	MonitorAddr string
+
 	// advanced options
 	DialTimeout time.Duration
 	ReadTimeout time.Duration
@@ -617,6 +620,13 @@ func (p configParser) ParseUserPasswdFile(val string) {
 		Fatal("userPasswdFile:", err)
 	}
 	config.UserPasswdFile = val
+}
+
+func (p configParser) ParseMonitorAddr(val string) {
+	if err := checkServerAddr(val); err != nil {
+		Fatal("monitor address", err)
+	}
+	config.MonitorAddr = val
 }
 
 func (p configParser) ParseRateLimitRedisSentinelMasterName(val string) {
