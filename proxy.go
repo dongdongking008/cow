@@ -108,6 +108,15 @@ var (
 )
 
 var (
+	proxyConnectionsDurationSeconds = prometheus.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Name: "cow_proxy_connections_duration_seconds",
+			Help: "A summary of the duration of proxy connections live.",
+			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+		},
+		[]string{"user"},
+	)
+
 	proxyRequestsDurationSeconds = prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Name: "cow_proxy_requests_duration_seconds",
@@ -127,6 +136,7 @@ var (
 )
 
 func init() {
+	prometheus.MustRegister(proxyConnectionsDurationSeconds)
 	prometheus.MustRegister(proxyRequestsDurationSeconds)
 	prometheus.MustRegister(proxyRequestErrorsCount)
 }
@@ -477,15 +487,17 @@ func (c *clientConn) serve() {
 	requestError := errUnknown
 	userName := "unknown"
 
-	timerRequest := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64){
-		if au != nil {
-			userName = au.userName
-		}
+	timerConnection := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64){
+		proxyConnectionsDurationSeconds.WithLabelValues(userName).Observe(v)
+	}))
+
+	var timerRequest *prometheus.Timer
+	requestObserver := prometheus.ObserverFunc(func(v float64){
 		proxyRequestsDurationSeconds.WithLabelValues(userName).Observe(v)
 		if requestError != nil {
 			proxyRequestErrorsCount.WithLabelValues(userName).Inc()
 		}
-	}))
+	})
 
 	defer func() {
 		if err := recover(); err != nil {
@@ -493,7 +505,10 @@ func (c *clientConn) serve() {
 		}
 		r.releaseBuf()
 		c.Close()
-		timerRequest.ObserveDuration()
+		timerConnection.ObserveDuration()
+		if timerRequest != nil {
+			timerRequest.ObserveDuration()
+		}
 	}()
 
 	// Refer to implementation.md for the design choices on parsing the request
@@ -503,8 +518,15 @@ func (c *clientConn) serve() {
 			panic("client read buffer nil")
 		}
 
+		// init userName for new request
+		userName = "unknown"
+		requestError = errUnknown
+
 		if err = parseRequest(c, &r); err != nil {
 			debug.Printf("cli(%s) parse request %v\n", c.RemoteAddr(), err)
+
+			proxyRequestErrorsCount.WithLabelValues(userName).Inc()
+
 			if err == io.EOF || isErrConnReset(err) {
 				return
 			}
@@ -518,6 +540,7 @@ func (c *clientConn) serve() {
 		}
 		dbgPrintRq(c, &r)
 
+		timerRequest = prometheus.NewTimer(requestObserver)
 		// PAC may leak frequently visited sites information. But if cow
 		// requires authentication for PAC, some clients may not be able
 		// handle it. (e.g. Proxy SwitchySharp extension on Chrome.)
@@ -542,6 +565,9 @@ func (c *clientConn) serve() {
 				return
 			}
 			authed = true
+			if au != nil {
+				userName = au.userName
+			}
 		}
 
 		if r.isConnect && !config.TunnelAllowedPort[r.URL.Port] {
@@ -578,6 +604,8 @@ func (c *clientConn) serve() {
 					debug.Printf("cli(%s) skip request body %v\n", c.RemoteAddr(), &r)
 					sendBody(SinkWriter{}, c.bufRd, int(r.ContLen), r.Chunking)
 				}
+				timerRequest.ObserveDuration()
+				timerRequest = nil
 				continue
 			}
 			return
@@ -604,6 +632,8 @@ func (c *clientConn) serve() {
 			} else if err == errPageSent && (!r.hasBody() || r.hasSent()) {
 				// Can only continue if request has no body, or request body
 				// has been read.
+				timerRequest.ObserveDuration()
+				timerRequest = nil
 				continue
 			}
 			return
@@ -611,6 +641,8 @@ func (c *clientConn) serve() {
 
 		// now we might think this request no error for proxy
 		requestError = nil
+		timerRequest.ObserveDuration()
+		timerRequest = nil
 
 		// Put server connection to pool, so other clients can use it.
 		_, isCowConn := sv.Conn.(cowConn)
