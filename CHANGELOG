@@ -1,3 +1,6 @@
+0.9.15 (2020-03-23)
+    * Fix cow_proxy_requests_duration_seconds bug
+
 0.9.14 (2020-03-23)
     * Identify PAC requests by fixing the userName to "[pac]"
 

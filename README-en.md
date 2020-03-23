@@ -2,7 +2,7 @@
 
 COW is a HTTP proxy to simplify bypassing the great firewall. It tries to automatically identify blocked websites and only use parent proxy for those sites.
 
-Current version: 0.9.14 [CHANGELOG](CHANGELOG)
+Current version: 0.9.15 [CHANGELOG](CHANGELOG)
 [![Build Status](https://travis-ci.org/cyfdecyf/cow.png?branch=master)](https://travis-ci.org/cyfdecyf/cow)
 
 ## Features
