@@ -389,9 +389,9 @@ func (c *clientConn) serveSelfURL(r *Request) (err error) {
 	}
 	if r.URL.Path == "/pac" || strings.HasPrefix(r.URL.Path, "/pac?") {
 		sendPAC(c)
-		// PAC header contains connection close, send non nil error to close
+		// PAC header contains connection close, send nil error to close
 		// client connection.
-		return errPageSent
+		return nil
 	}
 end:
 	sendErrorPage(c, "404 not found", "Page not found",
@@ -475,9 +475,9 @@ func (c *clientConn) serve() {
 	}
 
 	requestError := errUnknown
+	userName := "unknown"
 
 	timerRequest := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64){
-		userName := "unknown"
 		if au != nil {
 			userName = au.userName
 		}
@@ -522,10 +522,15 @@ func (c *clientConn) serve() {
 		// requires authentication for PAC, some clients may not be able
 		// handle it. (e.g. Proxy SwitchySharp extension on Chrome.)
 		if isSelfRequest(&r) {
+			// identify PAC request by fixing the userName to "[pac]"
+			userName = "[pac]"
+
 			if err = c.serveSelfURL(&r); err != nil {
 				return
 			}
-			continue
+			// now we might think this request no error for proxy
+			requestError = nil
+			return
 		}
 
 		if auth.required && !authed {
