@@ -11,7 +11,7 @@ import (
 
 // Do not end with "\r\n" so we can add more header later
 var headRawTmpl = "HTTP/1.1 {{.CodeReason}}\r\n" +
-	"Connection: keep-alive\r\n" +
+	"Connection: close\r\n" +
 	"Cache-Control: no-cache\r\n" +
 	"Pragma: no-cache\r\n" +
 	"Content-Type: text/html\r\n" +
