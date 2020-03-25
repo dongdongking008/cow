@@ -559,6 +559,9 @@ func (c *clientConn) serve() {
 		if auth.required && !authed {
 			if au, err = Authenticate(c, &r); err != nil {
 				errl.Printf("cli(%s) %v\n", c.RemoteAddr(), err)
+				if au != nil {
+					userName = au.userName
+				}
 				// Request may have body. To make things simple, close
 				// connection so we don't need to skip request body before
 				// reading the next request.
