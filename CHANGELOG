@@ -1,4 +1,7 @@
-0.9.16 (2020-03-23)
+0.9.17 (2020-03-25)
+    * Set userName when rate limited
+
+0.9.16 (2020-03-24)
     * Send "Connection: close" instead of "Connection: keep-alive" when sending error page back to client
 
 0.9.15 (2020-03-23)
