@@ -1,3 +1,6 @@
+0.9.18 (2020-04-09)
+    * Fix bugs: when parent proxy config changed, remove config cache in redis
+
 0.9.17 (2020-03-25)
     * Set userName when rate limited
 
