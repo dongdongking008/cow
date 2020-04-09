@@ -101,6 +101,15 @@ func NewRemainCountLimiter(limiterKey string, rcConfig map[string]*RateLimit) Re
 		panic(errors.New(fmt.Sprint("init remain count rate limiter config error:", resConfig.Err().Error())))
 	}
 
+	// Verify and delete unexpected config
+	verifyConfig := rdb.HKeys(limiter.rcConfigHashKey)
+	for _, configKey := range verifyConfig.Val() {
+		if mapConfig[configKey] == nil {
+			rdb.HDel(limiter.rcConfigHashKey, configKey)
+			info.Println("unexpected remain count rate limiter config: ", configKey, "found, auto deleted")
+		}
+	}
+
 	// Set last stat sorted set.
 	// Don't update already existing elements. Always add new elements.
 	result := rdb.ZAddNX(limiter.rcLastStatSortedSetKey, values...)
@@ -194,6 +203,15 @@ func NewRemainCountTokenBucketLimiter(limiterKey string, rctbConfig map[string]*
 	info.Println("init remain count rate limiter config result", resConfig)
 	if resConfig.Err() != nil {
 		panic(errors.New(fmt.Sprint("init remain count rate limiter config error:", resConfig.Err().Error())))
+	}
+
+	// Verify and delete unexpected config
+	verifyConfig := rdb.HKeys(limiter.rctbConfigHashKey)
+	for _, configKey := range verifyConfig.Val() {
+		if mapConfig[configKey] == nil {
+			rdb.HDel(limiter.rctbConfigHashKey, configKey)
+			info.Println("unexpected remain count rate limiter config: ", configKey, "found, auto deleted")
+		}
 	}
 
 	// Set last stat sorted set.
@@ -302,7 +320,7 @@ local limited = 1
 local remaining = 0
 local retry_after = 60
 local reset_after = 60
-local rate_limit_key_in_set
+local rate_limit_key_in_set = ""
 
 local rate_limit_sorted_set_key = KEYS[1]
 local rate_limit_config_hash_key = KEYS[2]
@@ -310,16 +328,16 @@ local rate_limit_key_replies = redis.call("ZRANGE", rate_limit_sorted_set_key, 0
 
 if #rate_limit_key_replies > 0 then
 	local config
-	for limit_key in ipairs(rate_limit_key_replies) do
-		rate_limit_key_in_set = rate_limit_key_replies[1]
-		config = redis.call("HGET", rate_limit_config_hash_key, rate_limit_key_in_set)
-		if #config > 0 then
-	    	break
+	for k, limit_key in ipairs(rate_limit_key_replies) do
+		config = redis.call("HGET", rate_limit_config_hash_key, limit_key)
+		if not config then
+	    	redis.call("ZREM", rate_limit_sorted_set_key, limit_key)
 		else
-			redis.call("ZREM", rate_limit_sorted_set_key, rate_limit_key_in_set)
+			rate_limit_key_in_set = limit_key
+			break
 		end
 	end
-	if #config > 0 then
+	if config then
 		local t = {}
 		for str in string.gmatch(config, "([^\:]+)") do
 			table.insert(t, str)
@@ -391,7 +409,7 @@ local limited = 1
 local remaining = 0
 local retry_after = 60
 local reset_after = 60
-local rate_limit_key_in_set
+local rate_limit_key_in_set = ""
 
 local rate_limit_sorted_set_key = KEYS[1]
 local rate_limit_remain_count_sorted_set_key = KEYS[2]
@@ -407,17 +425,17 @@ end
 
 if #rate_limit_key_replies > 0 then
 	local config
-	for limit_key in ipairs(rate_limit_key_replies) do
-		rate_limit_key_in_set = rate_limit_key_replies[1]
-		config = redis.call("HGET", rate_limit_config_hash_key, rate_limit_key_in_set)
-		if #config > 0 then
-	    	break
+	for k, limit_key in ipairs(rate_limit_key_replies) do
+		config = redis.call("HGET", rate_limit_config_hash_key, limit_key)
+		if not config then
+			redis.call("ZREM", rate_limit_sorted_set_key, limit_key)
+			redis.call("ZREM", rate_limit_remain_count_sorted_set_key, limit_key)
 		else
-			redis.call("ZREM", rate_limit_sorted_set_key, rate_limit_key_in_set)
-			redis.call("ZREM", rate_limit_remain_count_sorted_set_key, rate_limit_key_in_set)
+			rate_limit_key_in_set = limit_key
+	    	break
 		end
 	end
-	if #config > 0 then
+	if config then
 		local t = {}
 		for str in string.gmatch(config, "([^\:]+)") do
 			table.insert(t, str)
