@@ -7,6 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -131,7 +132,15 @@ var (
 			Name: "cow_proxy_request_errors_total",
 			Help: "Number of proxy request errors.",
 		},
-		[]string{"user"},
+		[]string{"user", "channel"},
+	)
+
+	proxyParentResponseCodesCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cow_proxy_parent_response_codes_total",
+			Help: "Number of proxy response from parent.",
+		},
+		[]string{"user", "channel", "code"},
 	)
 )
 
@@ -139,6 +148,7 @@ func init() {
 	prometheus.MustRegister(proxyConnectionsDurationSeconds)
 	prometheus.MustRegister(proxyRequestsDurationSeconds)
 	prometheus.MustRegister(proxyRequestErrorsCount)
+	prometheus.MustRegister(proxyParentResponseCodesCount)
 }
 
 type Proxy interface {
@@ -476,7 +486,6 @@ func (c *clientConn) serve() {
 	var rp Response
 	var sv *serverConn
 	var err error
-	var au *authUser
 
 	var authed bool
 	// For cow proxy server, authentication is done by matching password.
@@ -486,6 +495,7 @@ func (c *clientConn) serve() {
 
 	requestError := errUnknown
 	userName := "unknown"
+	channel := "notset"
 
 	timerConnection := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64){
 		proxyConnectionsDurationSeconds.WithLabelValues(userName).Observe(v)
@@ -495,7 +505,7 @@ func (c *clientConn) serve() {
 	requestObserver := prometheus.ObserverFunc(func(v float64){
 		proxyRequestsDurationSeconds.WithLabelValues(userName).Observe(v)
 		if requestError != nil {
-			proxyRequestErrorsCount.WithLabelValues(userName).Inc()
+			proxyRequestErrorsCount.WithLabelValues(userName, channel).Inc()
 		}
 	})
 
@@ -520,12 +530,13 @@ func (c *clientConn) serve() {
 
 		// init userName for new request
 		userName = "unknown"
+		channel = "notset"
 		requestError = errUnknown
 
 		if err = parseRequest(c, &r); err != nil {
 			debug.Printf("cli(%s) parse request %v\n", c.RemoteAddr(), err)
 
-			proxyRequestErrorsCount.WithLabelValues(userName).Inc()
+			proxyRequestErrorsCount.WithLabelValues(userName, channel).Inc()
 
 			if err == io.EOF || isErrConnReset(err) {
 				return
@@ -557,10 +568,10 @@ func (c *clientConn) serve() {
 		}
 
 		if auth.required && !authed {
-			if au, err = Authenticate(c, &r); err != nil {
+			if err = Authenticate(c, &r); err != nil {
 				errl.Printf("cli(%s) %v\n", c.RemoteAddr(), err)
-				if au != nil {
-					userName = au.userName
+				if r.user != nil {
+					userName = r.user.userName
 				}
 				// Request may have body. To make things simple, close
 				// connection so we don't need to skip request body before
@@ -568,8 +579,8 @@ func (c *clientConn) serve() {
 				return
 			}
 			authed = true
-			if au != nil {
-				userName = au.userName
+			if r.user != nil {
+				userName = r.user.userName
 			}
 		}
 
@@ -614,6 +625,10 @@ func (c *clientConn) serve() {
 			return
 		}
 
+		if httpConn, ok := sv.Conn.(httpConn); ok {
+			channel = httpConn.parent.getRateLimitKey()
+		}
+
 		if r.isConnect {
 			// server connection will be closed in doConnect
 			err = sv.doConnect(&r, c)
@@ -646,6 +661,9 @@ func (c *clientConn) serve() {
 		requestError = nil
 		timerRequest.ObserveDuration()
 		timerRequest = nil
+
+		proxyParentResponseCodesCount.WithLabelValues(userName, channel,
+			strconv.Itoa(rp.Status)).Inc()
 
 		// Put server connection to pool, so other clients can use it.
 		_, isCowConn := sv.Conn.(cowConn)
@@ -1111,6 +1129,26 @@ func copyServer2Client(sv *serverConn, c *clientConn, r *Request) (err error) {
 			// debug.Printf("copyServer2Client read data: %v\n", err)
 			return
 		}
+
+		if total <= 0 {
+			if httpConn, ok := sv.Conn.(httpConn); ok {
+				// To simplify things, assume Status-Line of HTTP has been read.
+				// response status line parsing
+				var f [][]byte
+				if f = FieldsN(buf, 3); len(f) >= 2 { // status line are separated by SP
+					if status, err := ParseIntFromBytes(f[1], 10); err == nil {
+					channel := httpConn.parent.getRateLimitKey()
+					userName := "unknown"
+					if r.user != nil {
+						userName = r.user.userName
+					}
+					proxyParentResponseCodesCount.WithLabelValues(userName, channel,
+						strconv.FormatInt(status, 10)).Inc()
+					}
+				}
+			}
+		}
+
 		total += n
 		if _, err = c.Write(buf[0:n]); err != nil {
 			// debug.Printf("copyServer2Client write data: %v\n", err)

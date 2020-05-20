@@ -64,6 +64,7 @@ type Request struct {
 	partial   bool // whether contains only partial request data
 	state     rqState
 	tryCnt    byte
+	user	*authUser
 }
 
 // Assume keep-alive request by default.
