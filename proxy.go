@@ -667,8 +667,10 @@ func (c *clientConn) serve() {
 			strconv.Itoa(rp.Status)).Inc()
 
 		// Put server connection to pool, so other clients can use it.
+		// If loadBalance is enabled, never cache serverConn due to
+		// serverConn was binding with one proxy specifically.
 		_, isCowConn := sv.Conn.(cowConn)
-		if rp.ConnectionKeepAlive || isCowConn {
+		if (rp.ConnectionKeepAlive && config.LoadBalance == loadBalanceBackup) || isCowConn {
 			if debug {
 				debug.Printf("cli(%s) connPool put %s", c.RemoteAddr(), sv.hostPort)
 			}
