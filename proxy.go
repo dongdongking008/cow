@@ -1135,7 +1135,7 @@ func copyServer2Client(sv *serverConn, c *clientConn, r *Request) (err error) {
 				// To simplify things, assume Status-Line of HTTP has been read.
 				// response status line parsing
 				var f [][]byte
-				if f = FieldsN(buf, 3); len(f) >= 2 { // status line are separated by SP
+				if f = FieldsN(buf[0:n], 3); len(f) >= 2 { // status line are separated by SP
 					if status, err := ParseIntFromBytes(f[1], 10); err == nil {
 					channel := httpConn.parent.getRateLimitKey()
 					userName := "unknown"
