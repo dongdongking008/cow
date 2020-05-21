@@ -1,3 +1,6 @@
+0.9.21 (2020-05-21)
+    * Fix bug: If clientRateLimit enabled, Authentication is required every request.
+
 0.9.20 (2020-05-21)
     * Fix bug: when read Status-Line of parent response, probably get unclean buffer conetent.
 
