@@ -1,3 +1,6 @@
+0.9.20 (2020-05-21)
+    * Fix bug: when read Status-Line of parent response, probably get unclean buffer conetent.
+
 0.9.19 (2020-05-20)
     * Add prometheus metrics cow_proxy_parent_response_codes_total
 
