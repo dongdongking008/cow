@@ -578,7 +578,8 @@ func (c *clientConn) serve() {
 				// reading the next request.
 				return
 			}
-			authed = true
+			// if clientRateLimit enabled, Authentication is required every request
+			authed = !auth.clientRateLimit
 			if r.user != nil {
 				userName = r.user.userName
 			}
